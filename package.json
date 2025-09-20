@@ -1,0 +1,29 @@
+{
+  "name": "scheduling-thingy",
+  "version": "1.0.0",
+  "description": "A scheduling application built during hackathon",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ayuzzbansal/scheduling-thingy.git"
+  },
+  "keywords": [
+    "scheduling",
+    "calendar",
+    "appointment",
+    "hackathon"
+  ],
+  "author": "Ayush Bansal",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/ayuzzbansal/scheduling-thingy/issues"
+  },
+  "homepage": "https://github.com/ayuzzbansal/scheduling-thingy#readme",
+  "dependencies": {},
+  "devDependencies": {}
+}
