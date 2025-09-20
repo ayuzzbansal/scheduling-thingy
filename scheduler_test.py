@@ -1,44 +1,66 @@
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
-import datetime
+# app.py
+
+from fastapi import FastAPI, Form
+from fastapi.responses import HTMLResponse
+from datetime import datetime, timedelta
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 import smtplib
 from email.mime.text import MIMEText
+import uuid
 import uvicorn
 
-# ============ AGENTS ============
+# ============ CALENDAR CORE ============
 
-class CalendarAgent:
-    def __init__(self):
-        # Mock events for now (replace with Google Calendar API integration)
-        self.events = [
-            {"title": "Team Standup", "date": "2025-09-21", "time": "10:00", "attendees": ["alice@example.com"]},
-            {"title": "Client Call", "date": "2025-09-21", "time": "14:00", "attendees": ["client@example.com"]},
-            {"title": "Project Review", "date": "2025-09-22", "time": "11:30", "attendees": ["bob@example.com"]},
-        ]
+def get_calendar_service(credentials: Credentials):
+    return build("calendar", "v3", credentials=credentials, cache_discovery=False)
 
-    def get_todays_events(self):
-        today = datetime.date.today().isoformat()
-        return [e for e in self.events if e["date"] == today]
+def list_todays_events(cal_service):
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).isoformat() + "Z"
+    today_end = (datetime.utcnow().replace(hour=23, minute=59, second=59, microsecond=0)).isoformat() + "Z"
+    events_result = cal_service.events().list(
+        calendarId="primary",
+        timeMin=today_start,
+        timeMax=today_end,
+        singleEvents=True,
+        orderBy="startTime"
+    ).execute()
+    return events_result.get("items", [])
 
+def create_event(cal_service, *, start_iso, end_iso, title, attendees, description=None):
+    event_body = {
+        "summary": title,
+        "start": {"dateTime": start_iso},
+        "end": {"dateTime": end_iso},
+        "attendees": [{"email": a} for a in attendees],
+        "conferenceData": {"createRequest": {"requestId": uuid.uuid4().hex}},
+    }
+    if description:
+        event_body["description"] = description
+    created = cal_service.events().insert(
+        calendarId="primary", body=event_body, conferenceDataVersion=1, sendUpdates="all"
+    ).execute()
+    return {"eventId": created.get("id"), "hangoutLink": created.get("hangoutLink")}
+
+# ============ EMAIL AGENT ============
 
 class EmailAgent:
-    def __init__(self, smtp_server="smtp.gmail.com", smtp_port=587, username=None, password=None):
-        self.smtp_server = smtp_server
-        self.smtp_port = smtp_port
+    def __init__(self, username=None, password=None):
         self.username = username
         self.password = password
+        self.smtp_server = "smtp.gmail.com"
+        self.smtp_port = 587
 
     def draft_email(self, event):
-        subject = f"Reminder: {event['title']} at {event['time']}"
+        subject = f"Reminder: {event['summary']} at {event['start']['dateTime']}"
         body = f"""
 Hello,
 
-This is a reminder for the upcoming event:
+This is a reminder for the event:
 
-Title: {event['title']}
-Date: {event['date']}
-Time: {event['time']}
+Title: {event['summary']}
+Start: {event['start']['dateTime']}
+End: {event['end']['dateTime']}
 
 See you there!
 """
@@ -46,8 +68,8 @@ See you there!
 
     def send_email(self, recipient, subject, body):
         if not self.username or not self.password:
-            print(f"[SIMULATION] Sending email to {recipient}: {subject}\n{body}")
-            return f"[SIMULATION] Email to {recipient}: {subject}"
+            print(f"[SIMULATION] Sending to {recipient}: {subject}")
+            return f"[SIMULATION] {recipient}: {subject}"
 
         msg = MIMEText(body)
         msg["Subject"] = subject
@@ -58,75 +80,64 @@ See you there!
             server.starttls()
             server.login(self.username, self.password)
             server.sendmail(self.username, [recipient], msg.as_string())
-        return f"✅ Email sent to {recipient}"
-
-
-class OrchestratorAgent:
-    def __init__(self, calendar_agent, email_agent):
-        self.calendar_agent = calendar_agent
-        self.email_agent = email_agent
-
-    def get_event_emails(self):
-        events = self.calendar_agent.get_todays_events()
-        results = []
-        for event in events:
-            subject, body = self.email_agent.draft_email(event)
-            results.append({"event": event, "subject": subject, "body": body})
-        return results
-
-    def send_all(self):
-        events = self.calendar_agent.get_todays_events()
-        logs = []
-        for event in events:
-            subject, body = self.email_agent.draft_email(event)
-            for attendee in event["attendees"]:
-                result = self.email_agent.send_email(attendee, subject, body)
-                logs.append(result)
-        return logs
-
+        return f"✅ Sent to {recipient}"
 
 # ============ FASTAPI APP ============
 
 app = FastAPI()
 
-cal_agent = CalendarAgent()
-email_agent = EmailAgent(username=None, password=None)  # set creds later if needed
-orchestrator = OrchestratorAgent(cal_agent, email_agent)
+# --- you must set up credentials beforehand (for demo, assume token.json exists) ---
+import os, json
+if os.path.exists("token.json"):
+    creds = Credentials.from_authorized_user_file("token.json", ["https://www.googleapis.com/auth/calendar"])
+    cal_service = get_calendar_service(creds)
+else:
+    cal_service = None
 
+email_agent = EmailAgent()  # fill creds if you want real send
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    emails = orchestrator.get_event_emails()
-    today = datetime.date.today().isoformat()
+    if not cal_service:
+        return "<h2>❌ No Google credentials found. Run OAuth first.</h2>"
+
+    events = list_todays_events(cal_service)
+    today = datetime.utcnow().date().isoformat()
 
     html = f"<h1>📅 Events for {today}</h1>"
-    if not emails:
+    if not events:
         html += "<p>No events today ✅</p>"
     else:
-        for e in emails:
+        for e in events:
+            subject, body = email_agent.draft_email(e)
+            attendees = ", ".join([a["email"] for a in e.get("attendees", [])])
             html += f"""
             <div style="border:1px solid #ddd; padding:10px; margin:10px;">
-              <h2>{e['event']['title']} ({e['event']['time']})</h2>
-              <p><b>Attendees:</b> {', '.join(e['event']['attendees'])}</p>
-              <p><b>Draft Subject:</b> {e['subject']}</p>
-              <pre>{e['body']}</pre>
+              <h2>{e['summary']}</h2>
+              <p><b>When:</b> {e['start']['dateTime']} - {e['end']['dateTime']}</p>
+              <p><b>Attendees:</b> {attendees}</p>
+              <p><b>Draft Subject:</b> {subject}</p>
+              <pre>{body}</pre>
             </div>
             """
         html += '<form action="/send" method="post"><button type="submit">📨 Send All Emails</button></form>'
     return html
 
-
 @app.post("/send", response_class=HTMLResponse)
 async def send_emails():
-    logs = orchestrator.send_all()
-    html = "<h1>📨 Email Results</h1>"
-    for log in logs:
-        html += f"<p>{log}</p>"
+    events = list_todays_events(cal_service)
+    logs = []
+    for e in events:
+        subject, body = email_agent.draft_email(e)
+        for attendee in e.get("attendees", []):
+            logs.append(email_agent.send_email(attendee["email"], subject, body))
+    html = "<h1>📨 Results</h1>"
+    for l in logs:
+        html += f"<p>{l}</p>"
     html += '<p><a href="/">⬅️ Back</a></p>'
     return html
 
-
-# ============ MAIN RUNNER ============
+# ============ MAIN ============
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
