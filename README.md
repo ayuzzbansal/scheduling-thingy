@@ -1,6 +1,6 @@
 # Scheduling Thingy
 
-A scheduling application built during hackathon.
+A scheduling application built during hackathon. (TEST CHANGE)
 
 ## Getting Started
 
