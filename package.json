@@ -19,6 +19,12 @@
     "hackathon"
   ],
   "author": "Ayush Bansal",
+  "contributors": [
+    {
+      "name": "shash976",
+      "url": "https://github.com/shash976"
+    }
+  ],
   "license": "MIT",
   "bugs": {
     "url": "https://github.com/ayuzzbansal/scheduling-thingy/issues"
