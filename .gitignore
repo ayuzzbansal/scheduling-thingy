@@ -1,4 +1,4 @@
-# Dependencies
+# Node.js Dependencies
 node_modules/
 npm-debug.log*
 yarn-debug.log*
@@ -59,16 +59,6 @@ typings/
 # Yarn Integrity file
 .yarn-integrity
 
-# dotenv environment variables file
-.env
-.env.test
-.env.local
-.env.production
-
-# parcel-bundler cache (https://parceljs.org/)
-.cache
-.parcel-cache
-
 # Next.js build output
 .next
 
@@ -97,6 +87,29 @@ public
 
 # Stores VSCode versions used for testing VSCode extensions
 .vscode-test
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables
+.env
+.env.test
+.env.local
+.env.production
+
+# Authentication tokens and secrets
+token.json
+client_secret.json
+
+# Virtual environment
+venv/
+env/
+
+# parcel-bundler cache (https://parceljs.org/)
+.cache
+.parcel-cache
 
 # IDE files
 .vscode/
