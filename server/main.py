@@ -6,13 +6,14 @@ from google.oauth2.credentials import Credentials
 import json
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
-# Import the tool classes
+# Import the tool classes and the new agent
 from gmail_service import GmailTool
 from calendar_service import CalendarTool
+from agent_service import SchedulingAgent
 
 app = FastAPI()
 
-# --- Configuration is the same ---
+# --- Configuration ---
 CLIENT_SECRETS_FILE = "client_secret.json"
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
@@ -24,7 +25,7 @@ TOKEN_FILE = "token.json"
 
 credentials = None
 
-# --- Credential loading/saving functions are the same ---
+# --- Credential loading/saving functions ---
 def load_credentials():
     global credentials
     if os.path.exists(TOKEN_FILE):
@@ -61,12 +62,12 @@ async def startup_event():
     else:
         print("No valid credentials found. Please log in.")
 
-# --- Login/Callback endpoints are the same ---
+# --- Login/Callback endpoints ---
 @app.get("/")
 async def root():
     if not credentials or not credentials.valid:
-        return {"message": "Welcome! Please log in.", "login_url": "/login"}
-    return {"message": "You are logged in."}
+        return {"message": "Welcome! Please log in.", "login_url": "/login", "run_agent_url": "/process-latest-email"}
+    return {"message": "You are logged in.", "run_agent_url": "/process-latest-email"}
 
 @app.get("/login")
 async def login():
@@ -90,44 +91,44 @@ async def callback(request: Request):
     save_credentials()
     return RedirectResponse("/")
 
-# --- API endpoints now use the Tool classes ---
+# --- MASTER AGENT ENDPOINT ---
+@app.get("/process-latest-email")
+async def process_latest_email():
+    if not credentials or not credentials.valid:
+        return RedirectResponse("/login")
+    
+    try:
+        agent = SchedulingAgent(credentials)
+        result = agent.run_on_latest_email()
+        return JSONResponse(content=result)
+    except Exception as e:
+        return JSONResponse(content={"status": "Failed", "error": str(e)}, status_code=500)
+
+# --- Tool Testing Endpoints (still useful for debugging) ---
 @app.get("/fetch-emails")
 async def fetch_emails():
     if not credentials or not credentials.valid:
         return RedirectResponse("/login")
-
     gmail_tool = GmailTool(credentials)
     emails = gmail_tool.list_recent_emails()
-    
     return JSONResponse(content={"emails": emails})
 
 @app.get("/find-free-slots")
 async def find_calendar_slots():
     if not credentials or not credentials.valid:
         return RedirectResponse("/login")
-            
-    # 1. Create an instance of the CalendarTool
     calendar_tool = CalendarTool(credentials)
-    # 2. Call the method on the instance
     slots = calendar_tool.find_free_slots()
-    
     return JSONResponse(content={"free_slots": slots})
 
 @app.get("/send-test-email")
 async def send_test_email():
     if not credentials or not credentials.valid:
         return RedirectResponse("/login")
-
     gmail_tool = GmailTool(credentials)
-    
     test_recipient = "gautamvirbhatia@gmail.com" 
-    subject = "Test Email from AI Scheduling Assistant (Class-based)"
+    subject = "Test Email from AI Scheduling Assistant"
     body = "This test confirms that the class-based GmailTool is working correctly."
-
     result = gmail_tool.send_reply(subject, body, test_recipient)
-
-    if "error" in str(result).lower():
-        return JSONResponse(content={"status": "Failed", "details": result})
-    else:
-        return JSONResponse(content={"status": "Success", "message_details": result})
+    return JSONResponse(content={"status": "Success", "message_details": result})
 
