@@ -1,101 +1,93 @@
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 import base64
 from email.mime.text import MIMEText
+from googleapiclient.discovery import build
 
 class GmailTool:
     """A tool for interacting with the Gmail API."""
-
     def __init__(self, credentials):
-        """
-        Initializes the GmailTool with user credentials.
-        Args:
-            credentials: The OAuth 2.0 credentials for the user.
-        """
         self.service = build('gmail', 'v1', credentials=credentials)
 
-    def list_recent_emails(self):
-        """Lists the 5 most recent emails from the user's inbox."""
+    def get_user_email(self):
+        """Gets the authenticated user's primary email address."""
         try:
-            results = self.service.users().messages().list(userId='me', labelIds=['INBOX'], maxResults=5).execute()
-            messages = results.get('messages', [])
+            profile = self.service.users().getProfile(userId='me').execute()
+            return profile.get('emailAddress')
+        except Exception as e:
+            print(f"An error occurred getting user email: {e}")
+            return None
 
-            email_list = []
-            if not messages:
-                return "No messages found."
-            else:
-                for message in messages:
-                    msg = self.service.users().messages().get(userId='me', id=message['id']).execute()
-                    payload = msg['payload']
-                    headers = payload.get("headers")
-                    
-                    subject = next((header['value'] for header in headers if header['name'] == 'Subject'), 'No Subject')
-                    sender = next((header['value'] for header in headers if header['name'] == 'From'), 'Unknown Sender')
-                    
-                    email_list.append({
-                        "id": msg['id'],
-                        "threadId": msg['threadId'],
-                        "subject": subject,
-                        "from": sender,
-                        "snippet": msg['snippet']
-                    })
-            return email_list
-        except HttpError as error:
-            return f"An error occurred with the Gmail API: {error}"
+    def list_recent_emails(self, count=5):
+        """Lists the most recent emails."""
+        results = self.service.users().messages().list(userId='me', maxResults=count).execute()
+        messages = results.get('messages', [])
+        
+        email_list = []
+        for message in messages:
+            msg = self.service.users().messages().get(userId='me', id=message['id']).execute()
+            headers = msg['payload']['headers']
+            subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'N/A')
+            sender = next((h['value'] for h in headers if h['name'] == 'From'), 'N/A')
+            email_list.append({
+                "id": msg['id'],
+                "threadId": msg['threadId'],
+                "subject": subject,
+                "from": sender,
+                "snippet": msg['snippet']
+            })
+        return email_list
 
-    def get_email_body(self, message_id):
-        """
-        Gets the full plain text body of a specific email.
-        Args:
-            message_id: The ID of the email message to retrieve.
-        Returns:
-            The decoded email body as a string, or an error message.
-        """
-        try:
-            message = self.service.users().messages().get(userId='me', id=message_id, format='full').execute()
-            payload = message['payload']
-            email_body = ""
+    def get_latest_email(self):
+        """Gets the single most recent email, including sender and thread ID."""
+        results = self.service.users().messages().list(userId='me', maxResults=1).execute()
+        messages = results.get('messages', [])
+        if not messages:
+            return None
+        
+        msg_id = messages[0]['id']
+        msg = self.service.users().messages().get(userId='me', id=msg_id).execute()
+        headers = msg['payload']['headers']
+        
+        sender_header = next((h['value'] for h in headers if h['name'] == 'From'), '')
+        # Extract just the email from a "Name <email@example.com>" format
+        sender_email = sender_header.split('<')[-1].strip('>') if '<' in sender_header else sender_header
 
-            if "parts" in payload:
-                for part in payload['parts']:
-                    if part['mimeType'] == 'text/plain':
-                        data = part['body'].get('data')
-                        if data:
-                            email_body = base64.urlsafe_b64decode(data).decode('utf-8')
-                            return email_body
-            elif 'body' in payload and payload['body'].get('data'):
-                data = payload['body'].get('data')
-                email_body = base64.urlsafe_b64decode(data).decode('utf-8')
-                return email_body
-            
-            return "Could not extract plain text content from the email."
+        return {
+            "id": msg_id,
+            "thread_id": msg['threadId'],
+            "sender": sender_email,
+            "subject": next((h['value'] for h in headers if h['name'] == 'Subject'), 'N/A')
+        }
+        
+    def get_email_body(self, msg_id):
+        """Gets the plain text body of a specific email."""
+        msg = self.service.users().messages().get(userId='me', id=msg_id, format='full').execute()
+        payload = msg['payload']
+        body = ""
 
-        except HttpError as error:
-            return f"An error occurred while fetching the email body: {error}"
+        if "parts" in payload:
+            for part in payload['parts']:
+                if part['mimeType'] == 'text/plain':
+                    data = part['body'].get('data')
+                    if data:
+                        body = base64.urlsafe_b64decode(data).decode('utf-8')
+                        break
+        elif 'body' in payload and payload['body'].get('data'):
+            data = payload['body'].get('data')
+            body = base64.urlsafe_b64decode(data).decode('utf-8')
+        
+        return body
 
-    def send_reply(self, subject, body, to_email):
-        """
-        Creates and sends an email reply on behalf of the user.
-        Args:
-            subject: The subject line of the email.
-            body: The plain text body of the email.
-            to_email: The recipient's email address.
-        Returns:
-            The sent message object or an error string.
-        """
-        try:
-            message = MIMEText(body)
-            message['to'] = to_email
-            message['from'] = 'me' 
-            message['subject'] = subject
-            
-            encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-            
-            create_message = {'raw': encoded_message}
-            
-            send_message = self.service.users().messages().send(userId="me", body=create_message).execute()
-            print(f'Message Id: {send_message["id"]}')
-            return send_message
-        except HttpError as error:
-            return f"An error occurred while sending the email: {error}"
+    def send_reply(self, to, subject, message_text, thread_id):
+        """Sends a reply email within a specific thread."""
+        message = MIMEText(message_text)
+        message['to'] = to
+        message['subject'] = subject
+        
+        create_message = {
+            'raw': base64.urlsafe_b64encode(message.as_bytes()).decode(),
+            'threadId': thread_id
+        }
+        
+        sent_message = self.service.users().messages().send(userId='me', body=create_message).execute()
+        print(f"Reply sent to {to}, Message ID: {sent_message['id']}")
 

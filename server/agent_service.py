@@ -1,72 +1,49 @@
 import os
 import json
 import requests
-import re
 from dotenv import load_dotenv
-from datetime import datetime
-import pytz
+from datetime import timedelta, datetime
 
-# Import the tools you built
 from gmail_service import GmailTool
 from calendar_service import CalendarTool
 
 # Load environment variables from a .env file
 load_dotenv()
 
-# --- Gemini API Configuration ---
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={GEMINI_API_KEY}"
-
-# --- JSON Schema for the AI model ---
-SCHEMA = {
-    "type": "OBJECT",
-    "properties": {
-        "isMeetingSuggested": {"type": "BOOLEAN"},
-        "meetingDetails": {
-            "type": "OBJECT",
-            "properties": {
-                "topic": {"type": "STRING"},
-                "attendees": {"type": "ARRAY", "items": {"type": "STRING"}},
-                "suggestedTimes": {
-                    "type": "ARRAY",
-                    "items": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "date": {"type": "STRING"},
-                            "time": {"type": "STRING"},
-                            "rawText": {"type": "STRING"}
-                        }
-                    }
-                }
-            }
-        }
-    },
-    "required": ["isMeetingSuggested"]
-}
-
-
 class SchedulingAgent:
-    """The orchestrator that uses tools and AI to handle scheduling."""
-
+    """The main agent that orchestrates the scheduling process."""
     def __init__(self, credentials):
-        if not GEMINI_API_KEY:
-            raise ValueError("GEMINI_API_KEY not found in environment variables.")
         self.gmail_tool = GmailTool(credentials)
         self.calendar_tool = CalendarTool(credentials)
-
-    def _format_datetime_for_email(self, dt_object):
-        """Helper to format a datetime object for a user-friendly email."""
-        if isinstance(dt_object, datetime):
-            # CORRECTED LINE: Changed '%-I' to '%I' for Windows compatibility
-            return dt_object.strftime('%A, %B %d at %I:%M %p %Z')
-        return str(dt_object) # Fallback
+        self.gemini_api_key = os.getenv("GEMINI_API_KEY")
+        self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={self.gemini_api_key}"
+        self.schema = {
+            "type": "OBJECT",
+            "properties": {
+                "isMeetingSuggested": {"type": "BOOLEAN"},
+                "meetingDetails": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "topic": {"type": "STRING"},
+                        "attendees": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    },
+                }
+            },
+            "required": ["isMeetingSuggested"]
+        }
 
     def analyze_email_with_ai(self, email_body):
-        """Uses the Gemini API to analyze email content."""
+        """Sends email content to Gemini for analysis."""
+        # Get the current date to provide context to the LLM
+        current_date = datetime.now().strftime("%A, %B %d, %Y")
+        
         prompt = f"""
-        You are an intelligent meeting scheduling assistant. Analyze the following email text. 
-        - If a meeting is suggested, set 'isMeetingSuggested' to true.
+        Analyze the following email to determine if a meeting is being suggested.
+        The current date is {current_date}. Use this to interpret relative dates like "tomorrow" or "next week".
+        
+        - If a meeting is suggested, set 'isMeetingSuggested' to true and extract the meeting topic.
         - If no meeting is suggested, set 'isMeetingSuggested' to false.
+
         Email Text:
         ---
         {email_body}
@@ -76,72 +53,67 @@ class SchedulingAgent:
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "responseMimeType": "application/json",
-                "responseSchema": SCHEMA,
+                "responseSchema": self.schema,
             }
         }
         headers = {'Content-Type': 'application/json'}
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
+        response = requests.post(self.api_url, headers=headers, json=payload)
         response.raise_for_status()
         
         result_json = response.json()
-        content_text = result_json.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
+        content_text = result_json.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '{}')
         return json.loads(content_text)
 
     def run_on_latest_email(self):
-        """The main orchestration logic for the agent."""
-        print("Agent running: Checking for latest email...")
-        
-        latest_emails = self.gmail_tool.list_recent_emails()
-        if not latest_emails or not isinstance(latest_emails, list):
-            return {"status": "No new emails to process or an error occurred."}
-        
-        latest_email_summary = latest_emails[0]
-        email_id = latest_email_summary['id']
-        sender_info = latest_email_summary['from']
-        
-        print(f"Processing email ID: {email_id} | Subject: {latest_email_summary['subject']}")
-
-        email_body = self.gmail_tool.get_email_body(email_id)
-        if "error" in str(email_body).lower():
-            return {"status": "Failed", "error": email_body}
-
+        """Runs the full agent process on the latest email."""
         try:
+            latest_email = self.gmail_tool.get_latest_email()
+            if not latest_email:
+                return {"status": "Complete", "action_taken": "No new emails found."}
+
+            email_body = self.gmail_tool.get_email_body(latest_email['id'])
             analysis = self.analyze_email_with_ai(email_body)
-            print("AI Analysis complete:", analysis)
+
+            if analysis.get("isMeetingSuggested"):
+                print("Meeting suggested, checking calendar...")
+                suggested_slot = self.calendar_tool.find_free_slots()
+
+                if suggested_slot:
+                    start_time = suggested_slot
+                    end_time = start_time + timedelta(hours=1)
+                    
+                    # Get user and sender emails for the invite
+                    user_email = self.gmail_tool.get_user_email()
+                    sender_email = latest_email['sender']
+                    attendees = [user_email, sender_email]
+
+                    # Create the event
+                    event_summary = analysis.get("meetingDetails", {}).get("topic", "Meeting")
+                    created_event = self.calendar_tool.create_event(start_time, end_time, event_summary, attendees)
+                    meet_link = created_event.get('hangoutLink', 'N/A')
+                    
+                    # Send a confirmation email with the Meet link
+                    formatted_time = start_time.strftime("%A, %B %d at %I:%M %p %Z")
+                    reply_subject = f"Re: {latest_email['subject']}"
+                    reply_body = (
+                        f"Hello,\n\n"
+                        f"Based on your request for '{event_summary}', I have scheduled a tentative meeting for us.\n\n"
+                        f"A calendar invitation for {formatted_time} has been sent to you.\n\n"
+                        f"You can join the video call here: {meet_link}\n\n"
+                        f"Best regards,\n"
+                        f"Scheduling Assistant"
+                    )
+                    
+                    self.gmail_tool.send_reply(latest_email['sender'], reply_subject, reply_body, latest_email['thread_id'])
+                    return {"status": "Complete", "action_taken": "Calendar event created and confirmation email sent."}
+                else:
+                    # Handle case where no slots are free (optional for MVP)
+                    return {"status": "Complete", "action_taken": "Meeting suggested but no free slots were found."}
+
+            else:
+                return {"status": "Complete", "action_taken": "No action required.", "analysis": analysis}
+
         except Exception as e:
-            return {"status": "Failed", "error": f"AI analysis failed: {e}"}
-
-        if analysis.get("isMeetingSuggested"):
-            print("Action: Meeting suggested. Checking calendar...")
-            
-            free_slots = self.calendar_tool.find_free_slots()
-            if not free_slots or not isinstance(free_slots, list):
-                return {"status": "Action Failed", "reason": "Could not find any free slots.", "details": free_slots}
-
-            proposed_time_obj = free_slots[0]
-            friendly_time = self._format_datetime_for_email(proposed_time_obj)
-            
-            sender_email_match = re.search(r'<(.+?)>', sender_info)
-            if not sender_email_match:
-                return {"status": "Action Failed", "reason": "Could not parse sender's email address."}
-            
-            to_email = sender_email_match.group(1)
-            
-            subject = f"Re: {latest_email_summary['subject']}"
-            body = (
-                f"Hello,\n\n"
-                f"Thank you for your email.\n\n"
-                f"I have checked the calendar and found an available slot at: {friendly_time}\n\n"
-                f"Please let me know if this time works for you.\n\n"
-                f"Best regards,\n"
-                f"Scheduling Assistant"
-            )
-
-            print(f"Action: Sending reply to {to_email} with proposed time {friendly_time}")
-            send_result = self.gmail_tool.send_reply(subject, body, to_email)
-
-            return {"status": "Action Complete", "action_taken": "Sent email reply with proposed time.", "details": send_result}
-        else:
-            print("Action: No meeting suggested. No action taken.")
-            return {"status": "Complete", "action_taken": "No action required.", "analysis": analysis}
+            print(f"An error occurred in the agent: {e}")
+            return {"status": "Failed", "error": str(e)}
 

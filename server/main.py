@@ -1,134 +1,126 @@
 import os
-from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse, JSONResponse
-from google_auth_oauthlib.flow import Flow
-from google.oauth2.credentials import Credentials
 import json
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse, RedirectResponse
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
-# Import the tool classes and the new agent
-from gmail_service import GmailTool
-from calendar_service import CalendarTool
-from agent_service import SchedulingAgent
+# --- FIX for InsecureTransportError ---
+# This tells the OAuth library that it's okay to use HTTP for local testing.
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
-app = FastAPI()
+# Import your tools
+from gmail_service import GmailTool
+from agent_service import SchedulingAgent
+from calendar_service import CalendarTool
 
 # --- Configuration ---
-CLIENT_SECRETS_FILE = "client_secret.json"
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/gmail.send',
     'https://www.googleapis.com/auth/calendar'
 ]
-REDIRECT_URI = 'http://127.0.0.1:8000/callback'
-TOKEN_FILE = "token.json"
+TOKEN_FILE = 'token.json'
+CLIENT_SECRETS_FILE = 'client_secrets.json'
+if not os.path.exists(CLIENT_SECRETS_FILE):
+    if os.path.exists('client_secret.json'):
+        CLIENT_SECRETS_FILE = 'client_secret.json'
 
+app = FastAPI()
 credentials = None
 
-# --- Credential loading/saving functions ---
-def load_credentials():
-    global credentials
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE, 'r') as token:
-            creds_data = json.load(token)
-        credentials = Credentials.from_authorized_user_info(creds_data, SCOPES)
-    
-    if not credentials or not credentials.valid:
-        if credentials and credentials.expired and credentials.refresh_token:
-            credentials.refresh(GoogleAuthRequest())
-            save_credentials()
-        else:
-            credentials = None
+# --- Credential Handling ---
 
-def save_credentials():
-    global credentials
-    if credentials:
-        creds_data = {
-            'token': credentials.token,
-            'refresh_token': credentials.refresh_token,
-            'token_uri': credentials.token_uri,
-            'client_id': credentials.client_id,
-            'client_secret': credentials.client_secret,
-            'scopes': credentials.scopes
-        }
-        with open(TOKEN_FILE, 'w') as token:
-            json.dump(creds_data, token)
+def save_credentials(creds):
+    """Saves credentials to the token.json file."""
+    with open(TOKEN_FILE, "w") as token:
+        token.write(creds.to_json())
+    print("INFO:     Credentials saved to token.json")
+
+def load_credentials():
+    """Loads credentials from token.json, refreshing if necessary."""
+    creds = None
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+    if creds and creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(GoogleAuthRequest())
+            save_credentials(creds) 
+            print("INFO:     Token was expired and has been refreshed.")
+        except Exception as e:
+            print(f"ERROR:    Failed to refresh token: {e}")
+            return None
+    return creds
 
 @app.on_event("startup")
 async def startup_event():
-    load_credentials()
+    """On startup, load credentials from a file if they exist."""
+    global credentials
+    credentials = load_credentials()
     if credentials:
-        print("Credentials loaded successfully.")
+        print("INFO:     Credentials loaded successfully.")
     else:
-        print("No valid credentials found. Please log in.")
+        print("INFO:     No valid credentials found. Please log in.")
+    print("INFO:     Application startup complete.")
 
-# --- Login/Callback endpoints ---
-@app.get("/")
-async def root():
-    if not credentials or not credentials.valid:
-        return {"message": "Welcome! Please log in.", "login_url": "/login", "run_agent_url": "/process-latest-email"}
-    return {"message": "You are logged in.", "run_agent_url": "/process-latest-email"}
+# --- Authentication Endpoints ---
 
 @app.get("/login")
-async def login():
-    flow = Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE, scopes=SCOPES, redirect_uri=REDIRECT_URI
-    )
-    authorization_url, state = flow.authorization_url(
-        access_type='offline', include_granted_scopes='true', prompt='consent'
-    )
+def login():
+    """Initiates the OAuth 2.0 login flow."""
+    if not os.path.exists(CLIENT_SECRETS_FILE):
+        raise HTTPException(status_code=404, detail=f"{CLIENT_SECRETS_FILE} not found.")
+    
+    flow = InstalledAppFlow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE, SCOPES, redirect_uri='http://127.0.0.1:8000/callback')
+    authorization_url, _ = flow.authorization_url()
     return RedirectResponse(authorization_url)
 
 @app.get("/callback")
-async def callback(request: Request):
+def callback(request: Request):
+    """Handles the callback from Google's OAuth 2.0 server."""
     global credentials
-    code = request.query_params.get('code')
-    flow = Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE, scopes=SCOPES, redirect_uri=REDIRECT_URI
-    )
-    flow.fetch_token(code=code)
-    credentials = flow.credentials
-    save_credentials()
-    return RedirectResponse("/")
-
-# --- MASTER AGENT ENDPOINT ---
-@app.get("/process-latest-email")
-async def process_latest_email():
-    if not credentials or not credentials.valid:
-        return RedirectResponse("/login")
+    state = request.query_params.get('state')
     
-    try:
-        agent = SchedulingAgent(credentials)
-        result = agent.run_on_latest_email()
-        return JSONResponse(content=result)
-    except Exception as e:
-        return JSONResponse(content={"status": "Failed", "error": str(e)}, status_code=500)
+    flow = InstalledAppFlow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE, SCOPES, state=state, redirect_uri='http://127.0.0.1:8000/callback')
+    
+    authorization_response = str(request.url)
+    flow.fetch_token(authorization_response=authorization_response)
+    
+    credentials = flow.credentials
+    save_credentials(credentials)
+    
+    return RedirectResponse(url='/')
 
-# --- Tool Testing Endpoints (still useful for debugging) ---
+# --- Tool & Agent Endpoints ---
+
+@app.get("/")
+def home():
+    if not credentials:
+        return {"message": "Welcome! Please log in.", "login_url": "/login"}
+    return {"message": "Authentication successful! You can now use the agent endpoints."}
+
+@app.get("/process-latest-email")
+def process_latest_email():
+    """Runs the full scheduling agent on the latest email."""
+    if not credentials:
+        return RedirectResponse('/login')
+    agent = SchedulingAgent(credentials)
+    result = agent.run_on_latest_email()
+    return JSONResponse(content=result)
+
+# The following endpoints are useful for testing individual tools
 @app.get("/fetch-emails")
-async def fetch_emails():
-    if not credentials or not credentials.valid:
-        return RedirectResponse("/login")
+def fetch_emails():
+    if not credentials: return RedirectResponse('/login')
     gmail_tool = GmailTool(credentials)
-    emails = gmail_tool.list_recent_emails()
-    return JSONResponse(content={"emails": emails})
+    return JSONResponse(content={"emails": gmail_tool.list_recent_emails()})
 
 @app.get("/find-free-slots")
-async def find_calendar_slots():
-    if not credentials or not credentials.valid:
-        return RedirectResponse("/login")
+def find_free_slots():
+    if not credentials: return RedirectResponse('/login')
     calendar_tool = CalendarTool(credentials)
-    slots = calendar_tool.find_free_slots()
-    return JSONResponse(content={"free_slots": slots})
-
-@app.get("/send-test-email")
-async def send_test_email():
-    if not credentials or not credentials.valid:
-        return RedirectResponse("/login")
-    gmail_tool = GmailTool(credentials)
-    test_recipient = "gautamvirbhatia@gmail.com" 
-    subject = "Test Email from AI Scheduling Assistant"
-    body = "This test confirms that the class-based GmailTool is working correctly."
-    result = gmail_tool.send_reply(subject, body, test_recipient)
-    return JSONResponse(content={"status": "Success", "message_details": result})
+    return JSONResponse(content={"free_slots": calendar_tool.find_free_slots()})
 
